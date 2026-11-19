@@ -27,6 +27,10 @@ GRACE_S = 90
 
 type Dwarf3ConfigEntry = ConfigEntry[Dwarf3Coordinator]
 
+# The motor positions only come from a poll. The relay's push carries the last ones it remembers, which can be from
+# the last time the scope was on, and taken as current they hide a scope that needs Prepare.
+POLLED_ONLY = ("pitch", "rotation")
+
 
 def _known(pushed: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """The pushed values worth keeping. A missing reading must not wipe one we have, but no job means no job."""
@@ -57,10 +61,17 @@ class Dwarf3Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def apply_live(self, pushed: dict[str, Any]) -> None:
         """Take a status the relay pushed. The poll's schedule is left alone, so it still reads the motors."""
+        pushed = {k: v for k, v in pushed.items() if k not in POLLED_ONLY}
         previous = self.data or {}
         self.live = pushed
         self._last_ok = time.monotonic()  # a push proves the relay is alive, whatever the next poll says
-        merged = {**previous, **_known(pushed, previous)}
+        reachable = pushed.get("scope_reachable")
+        if reachable is not None and bool(reachable) != bool(previous.get("scope_reachable")):
+            # The scope came or went. The positions we hold belong to the last time it was on, so wait for a poll.
+            previous_kept = {k: v for k, v in previous.items() if k not in POLLED_ONLY}
+        else:
+            previous_kept = previous
+        merged = {**previous_kept, **_known(pushed, previous_kept)}
         came_online = pushed.get("scope_reachable") and not previous.get("scope_reachable")
         if merged != previous or not self.last_update_success:
             self.data = merged

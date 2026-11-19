@@ -12,7 +12,7 @@ from custom_components.dwarf3 import live
 from custom_components.dwarf3.api import EventsUnsupported, RelayClient, RelayUnreachable
 from custom_components.dwarf3.live import follow_relay
 
-from .test_integration import BASE, mock_relay, setup
+from .test_integration import BASE, STATUS, mock_relay, setup
 
 
 async def test_events_are_parsed(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
@@ -57,6 +57,49 @@ async def test_a_push_shows_at_once_and_the_poll_keeps_it(hass: HomeAssistant, a
     await coordinator.async_refresh()
     assert hass.states.get("sensor.dwarf_3_battery").state == "64"
     assert coordinator.data["job"] is None
+
+
+PREPARED = {**STATUS, "job": None, "capture_state": 0, "pitch": 172.5, "rotation": 10.0}
+UNPREPARED = {**PREPARED, "pitch": None, "rotation": None}
+
+
+async def test_positions_from_the_last_session_do_not_hide_needs_prepare(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The relay keeps the last motor positions it read and pushes them even after the scope slept. A scope that
+    wakes up unprepared must still ask for Prepare."""
+    mock_relay(aioclient_mock, status=PREPARED)
+    entry = await setup(hass)
+    coordinator = entry.runtime_data
+    coordinator.live_connected = True
+    assert hass.states.get("binary_sensor.dwarf_3_needs_prepare").state == "off"
+
+    old_positions = {"pitch": 172.5, "rotation": 10.0}
+    coordinator.apply_live({"scope_reachable": False, **old_positions})
+    assert hass.states.get("binary_sensor.dwarf_3_needs_prepare").state == "unknown"
+
+    aioclient_mock.clear_requests()
+    mock_relay(aioclient_mock, status=UNPREPARED)
+    coordinator.apply_live({"scope_reachable": True, **old_positions})
+    assert hass.states.get("binary_sensor.dwarf_3_needs_prepare").state != "off", "the old positions are not news"
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.dwarf_3_needs_prepare").state == "on"
+    assert hass.states.get("sensor.dwarf_3_pitch").state == "unknown"
+
+
+async def test_a_push_never_replaces_the_motor_positions_a_poll_read(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    mock_relay(aioclient_mock, status=PREPARED)
+    entry = await setup(hass)
+    coordinator = entry.runtime_data
+    coordinator.live_connected = True
+    coordinator.apply_live({"pitch": 99.0, "rotation": 99.0, "battery_percent": 50})
+    assert (coordinator.data["pitch"], coordinator.data["rotation"]) == (172.5, 10.0)
+    await coordinator.async_refresh()
+    assert (coordinator.data["pitch"], coordinator.data["rotation"]) == (172.5, 10.0)
+    assert coordinator.data["battery_percent"] == 50
 
 
 async def test_a_missing_reading_never_wipes_a_known_one(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
